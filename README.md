@@ -6,6 +6,6 @@ This project is an enhanced version of the animal shelter dashboard originally d
 
 **Live Dashboard:** [mongodb+srv://grazioso_app:Butters@cluster0.ivnc1am.mongodb.net/](https://grazioso-salvare-dashboard.onrender.com)
 
-1. Open the dashboard link in a web browser.
-2. Enter username: staff and password: Butters.
-3. Click Sign In to access the dashboard.
+1. Open the dashboard link in a web browser
+2. Enter username: staff & password: Butters
+3. Click Sign In to access the dashboard
