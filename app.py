@@ -4,6 +4,10 @@ from pathlib import Path
 import base64
 import csv
 import io
+from dotenv import load_dotenv
+
+# load saved environment variables for local development
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import dash_leaflet as dl
 import plotly.graph_objects as go
@@ -12,6 +16,9 @@ from dash.exceptions import PreventUpdate
 from CRUD_Python_Module import AnimalShelter
 from animal_service import rescue_query, validate_animal
 from staff_auth import enable_staff_auth
+
+# rank eligible rescue candidates using the min-heap algorithm
+from rescue_ranking import rank_candidates
 
 # connect to the imported animal shelter database
 db = AnimalShelter()
@@ -81,6 +88,7 @@ else:
     sidebar_logo = None
 
 
+# build a reusable summary card for the overview
 def statistic_card(label, value, accent=False, value_id=None):
     return html.Div(
         [
@@ -95,6 +103,7 @@ def statistic_card(label, value, accent=False, value_id=None):
     )
 
 
+# create a navigation link with its active-state styling
 def navigation_link(label, path, component_id):
     return dcc.Link(
         label,
@@ -105,6 +114,7 @@ def navigation_link(label, path, component_id):
     )
 
 
+# summarize shelter records for the overview chart
 def make_overview_chart(records):
     type_counts = Counter(
         str(record.get("animal_type") or "Unknown") for record in records
@@ -144,6 +154,7 @@ def make_overview_chart(records):
     return fig
 
 
+# compare counts across the rescue categories
 def make_rescue_chart(counts_by_rescue):
     categories = ["Water Rescue", "Mountain Rescue", "Disaster Tracking"]
     counts = [
@@ -385,6 +396,32 @@ app.layout = html.Div(
                         ),
                     ],
                     className="section-card filter-card",
+                ),
+                # display the highest-ranking animals for the selected rescue assignment
+                html.Section(
+                    [
+                        html.Div(
+                            [
+                                html.H2(
+                                    "Top Rescue Candidates",
+                                    className="section-title",
+                                ),
+                                html.P(
+                                    "The ten highest-scoring eligible animals based on breed and age.",
+                                    className="card-subtitle",
+                                ),
+                            ],
+                        ),
+                        # populate ranked candidates when a rescue category is selected
+                        html.Div(
+                            id="ranked-candidates",
+                            children=html.P(
+                                "Select a rescue category above to view ranked candidates.",
+                                className="card-subtitle",
+                            ),
+                        ),
+                    ],
+                    className="section-card",
                 ),
                 html.Div(
                     [
@@ -743,6 +780,7 @@ app.layout = html.Div(
 )
 
 
+# reload table records when the rescue filter or data changes
 @app.callback(
     Output("animal-table", "data"),
     Output("animal-table", "selected_rows"),
@@ -753,6 +791,77 @@ def update_animal_records(filter_type, _version):
     # retrieve matching animals through the data access layer
     filtered = db.read(rescue_query(filter_type), animal_fields)
     return filtered, [0] if filtered else []
+
+
+# update ranked candidates when rescue filters or animal records change
+@app.callback(
+    Output("ranked-candidates", "children"),
+    Input("rescue-filter", "value"),
+    Input("record-version", "data"),
+)
+def update_ranked_candidates(category, _version):
+    # require a rescue category before generating recommendations
+    if category not in ("water", "mountain", "disaster"):
+        return html.P(
+            "Select a rescue category above to view ranked candidates.",
+            className="card-subtitle",
+        )
+
+    # retrieve eligible animals using the existing rescue criteria
+    try:
+        animals = db.read(rescue_query(category), animal_fields)
+        # select the ten strongest candidates with the min-heap
+        ranked = rank_candidates(animals, category, k=10)
+        # check how many animals are retrieved and ranked
+        print(f"Rescue category: {category}")
+        print(f"Animals retrieved: {len(animals)}")
+        print(f"Candidates ranked: {len(ranked)}")
+    except Exception:
+        return html.P(
+            "Unable to retrieve rescue candidates.",
+            className="card-subtitle",
+        )
+
+    # display a message when no animals qualify
+    if not ranked:
+        return html.P(
+            "No eligible animals were found for this rescue category.",
+            className="card-subtitle",
+        )
+
+    # display the ten highest-ranking rescue candidates
+    return html.Div(
+        [
+            html.Div(
+                [
+                    # display the candidate's rank, name, and animal id
+                    html.Div(
+                        [
+                            html.Strong(f"#{index}"),
+                            html.Strong(str(animal.get("name") or "Unnamed Animal")),
+                            html.Span(f"ID: {animal.get('animal_id', 'N/A')}"),
+                        ],
+                        className="candidate-heading",
+                    ),
+                    # display the candidate's breed, age, and suitability score
+                    html.Div(
+                        [
+                            html.Span(str(animal.get("breed") or "Unknown Breed")),
+                            html.Span(
+                                f"Age: {animal.get('age_upon_outcome_in_weeks', 0):.1f} weeks"
+                            ),
+                            html.Strong(f"{result['score']}/10"),
+                        ],
+                        className="candidate-details",
+                    ),
+                ],
+                className="candidate-card",
+            )
+            for index, result in enumerate(ranked, start=1)
+            for animal in [result["animal"]]
+        ],
+        className="candidate-grid",
+    )
 
 
 # load the selected animal into the edit form
@@ -990,6 +1099,7 @@ def refresh_overview(_version):
     )
 
 
+# show the number of records currently in the table
 @app.callback(
     Output("record-count", "children"),
     Output("stats-matching", "children"),
@@ -1020,6 +1130,7 @@ def detail_item(label, value):
     )
 
 
+# display details for the selected animal without another query
 @app.callback(
     Output("selected-animal-details", "children"),
     Input("animal-table", "derived_virtual_data"),
@@ -1095,6 +1206,7 @@ def export_filtered_records(n_clicks, view_data):
     }
 
 
+# rebuild the breed chart from the filtered records
 @app.callback(
     Output("breed-chart", "figure"), Input("animal-table", "derived_virtual_data")
 )
@@ -1144,6 +1256,7 @@ def update_breed_chart(view_data):
     return fig
 
 
+# plot valid animal coordinates and highlight the selected record
 @app.callback(
     Output("animal-map", "children"),
     Output("selected-animal-info", "children"),

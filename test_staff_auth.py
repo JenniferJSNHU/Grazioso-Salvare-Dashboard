@@ -10,6 +10,7 @@ from staff_auth import enable_staff_auth
 
 class TestStaffAuthentication(unittest.TestCase):
 
+    # configure a test server and temporary staff credentials
     def setUp(self):
         # configure temporary test credentials
         self.password = "test-password-123"

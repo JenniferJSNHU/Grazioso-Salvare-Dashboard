@@ -37,6 +37,7 @@ RESCUE_QUERIES = {
     },
 }
 
+# require these fields when creating a new animal
 REQUIRED_FIELDS = (
     "animal_id",
     "animal_type",
@@ -45,11 +46,13 @@ REQUIRED_FIELDS = (
     "age_upon_outcome_in_weeks",
 )
 
+# allow only the fields supported by the staff forms
 TEXT_FIELDS = {"animal_id", "name", "animal_type", "breed", "sex_upon_outcome"}
 NUMBER_FIELDS = {"age_upon_outcome_in_weeks", "location_lat", "location_long"}
 ALLOWED_FIELDS = TEXT_FIELDS | NUMBER_FIELDS
 
 
+# return the criteria for a rescue type or clear the filter
 def rescue_query(category):
     """Return the MongoDB filter for a rescue category."""
     if category in ("reset", None):
@@ -59,6 +62,7 @@ def rescue_query(category):
     return RESCUE_QUERIES[category].copy()
 
 
+# check staff form data before any database write
 def validate_animal(record, *, updating=False):
     """Validate fields supplied by a staff form.
 
@@ -69,10 +73,12 @@ def validate_animal(record, *, updating=False):
     if not isinstance(record, dict) or not record:
         raise ValueError("Provide animal record fields.")
 
+    # block unexpected fields before processing the record
     unsupported = set(record) - ALLOWED_FIELDS
     if unsupported:
         raise ValueError(f"Unsupported fields: {', '.join(sorted(unsupported))}.")
 
+    # keep animal IDs stable so records remain identifiable
     if updating and "animal_id" in record:
         raise ValueError("Animal ID cannot be changed.")
 
@@ -81,6 +87,7 @@ def validate_animal(record, *, updating=False):
         if missing:
             raise ValueError(f"Missing required fields: {', '.join(missing)}.")
 
+    # normalize text and validate numeric input one field at a time
     cleaned = {}
     for key, value in record.items():
         if key in TEXT_FIELDS:
@@ -102,6 +109,7 @@ def validate_animal(record, *, updating=False):
                 raise ValueError("Longitude must be between -180 and 180.")
         cleaned[key] = value
 
+    # require a complete coordinate pair for accurate mapping
     if ("location_lat" in cleaned) != ("location_long" in cleaned):
         raise ValueError("Latitude and longitude must be provided together.")
 
