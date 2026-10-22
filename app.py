@@ -5,8 +5,6 @@ import base64
 import csv
 import io
 
-# load saved environment variables for local development
-load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import dash_leaflet as dl
 import plotly.graph_objects as go
