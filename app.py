@@ -3,6 +3,10 @@ from pathlib import Path
 import base64
 import csv
 import io
+from dotenv import load_dotenv
+
+# load saved environment variables for local development
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import dash_leaflet as dl
 import plotly.graph_objects as go
@@ -16,9 +20,6 @@ from animal_service import (
     validate_animal,
 )
 from staff_auth import enable_staff_auth
-
-# load saved environment variables for local development
-load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # rank eligible rescue candidates using the min-heap algorithm
 from rescue_ranking import rank_candidates
