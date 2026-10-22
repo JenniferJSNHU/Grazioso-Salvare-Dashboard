@@ -5,6 +5,7 @@ The dashboard can use these functions before calling the CRUD module.
 """
 
 from math import isfinite
+import re
 
 # rescue criteria retained from the original CS 340 dashboard
 RESCUE_QUERIES = {
@@ -60,6 +61,86 @@ def rescue_query(category):
     if category not in RESCUE_QUERIES:
         raise ValueError("Unknown rescue category.")
     return RESCUE_QUERIES[category].copy()
+
+
+# allow table searches only on displayed database fields
+TABLE_FILTER_FIELDS = {
+    "animal_id",
+    "name",
+    "animal_type",
+    "breed",
+    "sex_upon_outcome",
+    "age_upon_outcome_in_weeks",
+}
+
+
+# translate dash column filters into validated mongodb queries
+def build_table_query(rescue_type, filter_query):
+    query = rescue_query(rescue_type)
+    if not filter_query:
+        return query
+
+    # match supported operators without treating user text as query syntax
+    operator_pattern = (
+        r"icontains|scontains|contains|ieq|seq|eq|ne|ge|gt|le|lt|>=|<=|!=|>|<|="
+    )
+    pattern = re.compile(
+        r"^\{([a-z_]+)\}\s*(" + operator_pattern + r")\s*(.*?)\s*$"
+    )
+    conditions = []
+
+    # combine filters from multiple columns using AND
+    for expression in filter_query.split(" && "):
+        match = pattern.fullmatch(expression.strip())
+        if match is None:
+            return {"_id": {"$exists": False}}
+
+        field, operator, value = match.groups()
+        if field not in TABLE_FILTER_FIELDS:
+            return {"_id": {"$exists": False}}
+
+        # remove surrounding quote characters from dash filter values
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if not value or len(value) > 256:
+            return {"_id": {"$exists": False}}
+
+        if field == "age_upon_outcome_in_weeks":
+            # compare age as a number rather than text
+            try:
+                number = float(value)
+            except ValueError:
+                return {"_id": {"$exists": False}}
+            if not isfinite(number):
+                return {"_id": {"$exists": False}}
+            comparisons = {
+                "=": "$eq", "eq": "$eq", "ieq": "$eq", "seq": "$eq",
+                "ne": "$ne", "!=": "$ne", "ge": "$gte", ">=": "$gte",
+                "gt": "$gt", ">": "$gt", "le": "$lte", "<=": "$lte",
+                "lt": "$lt", "<": "$lt",
+            }
+            if operator not in comparisons:
+                return {"_id": {"$exists": False}}
+            conditions.append({field: {comparisons[operator]: number}})
+        else:
+            # escape special characters to prevent regex injection
+            escaped = re.escape(value)
+            if operator in ("=", "eq", "ieq", "seq"):
+                escaped = f"^{escaped}$"
+            elif operator in ("ne", "!="):
+                escaped = f"^{escaped}$"
+            elif operator not in ("contains", "icontains", "scontains"):
+                return {"_id": {"$exists": False}}
+            criterion = {"$regex": escaped}
+            if operator not in ("scontains", "seq"):
+                criterion["$options"] = "i"
+            if operator in ("ne", "!="):
+                conditions.append({field: {"$not": criterion}})
+            else:
+                conditions.append({field: criterion})
+
+    # apply table searches alongside the existing rescue filter
+    return {"$and": [query, *conditions]} if conditions else query
 
 
 # check staff form data before any database write

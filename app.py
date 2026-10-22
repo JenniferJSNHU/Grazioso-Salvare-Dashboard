@@ -1,17 +1,24 @@
-from collections import Counter
 from math import isfinite
 from pathlib import Path
 import base64
 import csv
 import io
+from dotenv import load_dotenv
 
+# load saved environment variables for local development
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import dash_leaflet as dl
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dash_table, dcc, html
 from dash.exceptions import PreventUpdate
 from CRUD_Python_Module import AnimalShelter
-from animal_service import rescue_query, validate_animal
+from animal_service import (
+    TABLE_FILTER_FIELDS,
+    build_table_query,
+    rescue_query,
+    validate_animal,
+)
 from staff_auth import enable_staff_auth
 
 # rank eligible rescue candidates using the min-heap algorithm
@@ -32,21 +39,20 @@ animal_fields = {
     "location_lat": 1,
     "location_long": 1,
 }
+# retrieve animal type totals directly from MongoDB
+animal_type_counts = db.aggregate_field_counts("animal_type")
 
-# retrieve animal records through the data access layer
-animal_records = db.read({}, animal_fields)
-
-# count all animals and individual animal types
+# count the total number of animals and the number of dogs and cats
 total_animals = db.count({})
 total_dogs = db.count({"animal_type": "Dog"})
 total_cats = db.count({"animal_type": "Cat"})
 
-# count animals eligible for each rescue category
+# count the number of animals matching each rescue category
 rescue_counts = {
     name: db.count(rescue_query(name)) for name in ("water", "mountain", "disaster")
 }
 
-# keep exported data consistent with the columns displayed in the table
+# define the columns to include in CSV exports
 export_columns = [
     ("Animal ID", "animal_id"),
     ("Name", "name"),
@@ -56,19 +62,19 @@ export_columns = [
     ("Age (Weeks)", "age_upon_outcome_in_weeks"),
 ]
 
-
+# initialize the Dash app
 app = Dash(__name__)
 app.title = "Grazioso Salvare | Dashboard"
 
 # expose the Flask server to the production WSGI runner
 server = app.server
 
-# require staff authentication for dashboard requests
+# enable staff authentication for record creation and editing
 enable_staff_auth(app.server)
 
 
-# load the existing logo directly from the project folder
-logo_path = Path(__file__).resolve().parent / "Grazioso Salvare Logo.png"
+# embed the Grazioso Salvare logo in the sidebar if it exists in the assets folder
+logo_path = Path(__file__).resolve().parent / "assets" / "grazioso_salvare_logo.png"
 if logo_path.exists():
     encoded_logo = base64.b64encode(logo_path.read_bytes()).decode("ascii")
     sidebar_logo = html.Img(
@@ -85,7 +91,7 @@ else:
     sidebar_logo = None
 
 
-# build a reusable summary card for the overview
+# create a reusable statistic card for the dashboard overview
 def statistic_card(label, value, accent=False, value_id=None):
     return html.Div(
         [
@@ -100,7 +106,7 @@ def statistic_card(label, value, accent=False, value_id=None):
     )
 
 
-# create a navigation link with its active-state styling
+# create a reusable navigation link for the sidebar
 def navigation_link(label, path, component_id):
     return dcc.Link(
         label,
@@ -111,17 +117,18 @@ def navigation_link(label, path, component_id):
     )
 
 
-# summarize shelter records for the overview chart
-def make_overview_chart(records):
-    type_counts = Counter(
-        str(record.get("animal_type") or "Unknown") for record in records
-    )
-    top_types = type_counts.most_common(4)
-    remaining = sum(type_counts.values()) - sum(count for _, count in top_types)
+def make_overview_chart(grouped_counts):
+    # use MongoDB totals for the four most common animal types
+    top_types = [(str(item["_id"]), item["count"]) for item in grouped_counts[:4]]
+    # combine any remaining animal types into Other
+    remaining = sum(item["count"] for item in grouped_counts[4:])
+    # group all remaining types into a single "Other" category
     if remaining:
         top_types.append(("Other", remaining))
     fig = go.Figure()
+    # only add a pie chart trace if there are records to display
     if top_types:
+        # configure the pie chart with a donut hole and custom colors
         fig.add_trace(
             go.Pie(
                 labels=[label for label, _ in top_types],
@@ -134,6 +141,7 @@ def make_overview_chart(records):
                 hovertemplate="%{label}: %{value:,} (%{percent})<extra></extra>",
             )
         )
+    # configure the chart layout for a clean dashboard appearance
     fig.update_layout(
         template="plotly_white",
         margin={"l": 8, "r": 105, "t": 6, "b": 6},
@@ -159,6 +167,7 @@ def make_rescue_chart(counts_by_rescue):
         counts_by_rescue["mountain"],
         counts_by_rescue["disaster"],
     ]
+    # only add a bar chart trace if there are records to display
     fig = go.Figure(
         go.Bar(
             x=counts,
@@ -170,6 +179,7 @@ def make_rescue_chart(counts_by_rescue):
             hovertemplate="%{y}: %{x:,} matching animals<extra></extra>",
         )
     )
+    # configure the chart layout for a clean dashboard appearance
     fig.update_layout(
         template="plotly_white",
         height=350,
@@ -199,13 +209,22 @@ def animal_table():
             {"name": "Sex", "id": "sex_upon_outcome"},
             {"name": "Age (Weeks)", "id": "age_upon_outcome_in_weeks"},
         ],
-        data=animal_records,
+        # load table records by page instead of loading the entire collection
+        data=[],
+        page_current=0,
         page_size=8,
-        page_action="native",
-        sort_action="native",
-        filter_action="native",
+        page_count=0,
+        page_action="custom",
+        # process sorting and filtering through mongodb
+        sort_action="custom",
+        sort_mode="single",
+        sort_by=[],
+        filter_action="custom",
+        filter_options={"case": "insensitive"},
+        filter_query="",
+        # preserve single-animal selection for profiles and editing
         row_selectable="single",
-        selected_rows=[0] if animal_records else [],
+        selected_rows=[],
         style_table={"overflowX": "auto"},
         style_cell={
             "textAlign": "left",
@@ -219,6 +238,7 @@ def animal_table():
             "border": "none",
             "borderBottom": "1px solid #edf1f5",
         },
+        # style the header and data rows for a clean dashboard appearance
         style_header={
             "backgroundColor": "#f5f8fa",
             "fontWeight": "700",
@@ -226,6 +246,7 @@ def animal_table():
             "border": "none",
             "borderBottom": "1px solid #e4eaf0",
         },
+        # style the selected row with a subtle highlight and border
         style_data={"backgroundColor": "white", "color": "#243447"},
         style_data_conditional=[
             {
@@ -251,6 +272,7 @@ app.layout = html.Div(
         # sidebar links jump to sections instead of switching between pages
         html.Aside(
             [
+                # display the logo and shelter name at the top of the sidebar
                 html.Div(
                     [
                         sidebar_logo,
@@ -259,6 +281,7 @@ app.layout = html.Div(
                     ],
                     className="sidebar-brand",
                 ),
+                # provide a clear label for the workspace navigation links
                 html.Div("WORKSPACE", className="nav-caption"),
                 html.Nav(
                     [
@@ -268,6 +291,7 @@ app.layout = html.Div(
                         html.A("Intake", href="#staff-tools", className="nav-item"),
                     ],
                 ),
+                # provide a clear label for the local database information
                 html.Div(
                     [
                         html.Div("LOCAL DATABASE", className="sidebar-footer-title"),
@@ -278,6 +302,7 @@ app.layout = html.Div(
             ],
             className="sidebar",
         ),
+        # main content area contains the overview, records, analytics, and staff tools
         html.Main(
             [
                 html.A(id="overview"),
@@ -286,10 +311,12 @@ app.layout = html.Div(
                     [
                         html.Div(
                             [
+                                # provide a clear label for the dashboard heading
                                 html.Div("SHELTER OPERATIONS", className="eyebrow"),
                                 html.H1(
                                     "Animal Rescue Dashboard", className="page-title"
                                 ),
+                                # provide a clear label for the dashboard context
                                 html.P(
                                     "Explore the shelter population, find rescue candidates, and review individual records.",
                                     className="page-subtitle",
@@ -329,7 +356,7 @@ app.layout = html.Div(
                                         ),
                                         statistic_card(
                                             "Matching Current Filters",
-                                            len(animal_records),
+                                            total_animals,
                                             accent=True,
                                             value_id="stats-matching",
                                         ),
@@ -350,7 +377,7 @@ app.layout = html.Div(
                                 ),
                                 dcc.Graph(
                                     id="overview-type-chart",
-                                    figure=make_overview_chart(animal_records),
+                                    figure=make_overview_chart(animal_type_counts),
                                     config={"displayModeBar": False},
                                 ),
                             ],
@@ -778,16 +805,68 @@ app.layout = html.Div(
 
 
 # reload table records when the rescue filter or data changes
+# return to the first page when rescue or table filters change
+@app.callback(
+    Output("animal-table", "page_current"),
+    Input("rescue-filter", "value"),
+    Input("animal-table", "filter_query"),
+    prevent_initial_call=True,
+)
+def reset_animal_page(filter_type, filter_query):
+    return 0
+
+
+# retrieve only the requested page of animal records from mongodb
 @app.callback(
     Output("animal-table", "data"),
+    Output("animal-table", "page_count"),
     Output("animal-table", "selected_rows"),
+    Input("animal-table", "page_current"),
+    Input("animal-table", "page_size"),
+    Input("animal-table", "sort_by"),
+    Input("animal-table", "filter_query"),
     Input("rescue-filter", "value"),
     Input("record-version", "data"),
 )
-def update_animal_records(filter_type, _version):
+def update_animal_records(
+    page_current, page_size, sort_by, filter_query, filter_type, _version
+):
     # retrieve matching animals through the data access layer
-    filtered = db.read(rescue_query(filter_type), animal_fields)
-    return filtered, [0] if filtered else []
+    # combine rescue criteria with approved table filters
+    query = build_table_query(filter_type, filter_query)
+
+    # count matching records to calculate the number of pages
+    total_records = db.count(query)
+    page_count = (total_records + page_size - 1) // page_size
+
+    # prevent requests beyond the available pages
+    page = min(page_current or 0, max(page_count - 1, 0))
+
+    # use the selected table column and direction for database sorting
+    sort_field = "animal_id"
+    sort_direction = 1
+
+    if sort_by:
+        requested_field = sort_by[0].get("column_id")
+
+        if requested_field in TABLE_FILTER_FIELDS:
+            sort_field = requested_field
+            sort_direction = -1 if sort_by[0].get("direction") == "desc" else 1
+
+    # retrieve the sorted page directly from mongodb
+    records = db.read_page(
+        query,
+        projection=animal_fields,
+        page=page,
+        page_size=page_size,
+        sort_field=sort_field,
+        sort_direction=sort_direction,
+    )
+
+    # select the first animal when records are available
+    selected_rows = [0] if records else []
+
+    return records, page_count, selected_rows
 
 
 # update ranked candidates when rescue filters or animal records change
@@ -871,12 +950,13 @@ def update_ranked_candidates(category, _version):
     Output("edit-age", "value"),
     Output("edit-lat", "value"),
     Output("edit-long", "value"),
-    Input("animal-table", "derived_virtual_data"),
-    Input("animal-table", "derived_virtual_selected_rows"),
+    Input("animal-table", "data"),
+    Input("animal-table", "selected_rows"),
 )
 def load_animal_for_edit(view_data, selected_rows):
     # use the current filtered and sorted table data
-    records = animal_records if view_data is None else view_data
+    # use the records retrieved for the current table page
+    records = view_data or []
 
     # clear the form when no valid animal is selected
     if not selected_rows or not records:
@@ -1077,8 +1157,8 @@ def create_animal_record(
     Input("record-version", "data"),
 )
 def refresh_overview(_version):
-    # retrieve animal records through the data access layer
-    records = db.read({}, animal_fields)
+    # retrieve updated animal type totals using MongoDB aggregation
+    type_counts = db.aggregate_field_counts("animal_type")
 
     # count animals eligible for each rescue category
     counts = {
@@ -1088,23 +1168,32 @@ def refresh_overview(_version):
 
     # update dashboard statistics and charts
     return (
-        f"{len(records):,}",
+        f"{db.count({}):,}",
         f"{db.count({'animal_type': 'Dog'}):,}",
         f"{db.count({'animal_type': 'Cat'}):,}",
-        make_overview_chart(records),
+        make_overview_chart(type_counts),
         make_rescue_chart(counts),
     )
 
 
 # show the number of records currently in the table
+# count all matching animals independently of the current table page
 @app.callback(
     Output("record-count", "children"),
     Output("stats-matching", "children"),
-    Input("animal-table", "derived_virtual_data"),
+    Input("rescue-filter", "value"),
+    Input("animal-table", "filter_query"),
+    Input("record-version", "data"),
 )
-def update_record_count(view_data):
-    count = len(animal_records) if view_data is None else len(view_data)
-    return f"{count:,} records in view", f"{count:,}"
+def update_record_count(filter_type, filter_query, _version):
+
+    # apply the same database filters used by the animal table
+    query = build_table_query(filter_type, filter_query)
+
+    # count matching records without retrieving the documents
+    count = db.count(query)
+
+    return f"{count:,} matching records", f"{count:,}"
 
 
 # display the selected record without requiring another database request
@@ -1130,11 +1219,12 @@ def detail_item(label, value):
 # display details for the selected animal without another query
 @app.callback(
     Output("selected-animal-details", "children"),
-    Input("animal-table", "derived_virtual_data"),
-    Input("animal-table", "derived_virtual_selected_rows"),
+    Input("animal-table", "data"),
+    Input("animal-table", "selected_rows"),
 )
 def show_selected_animal(view_data, selected_rows):
-    records = animal_records if view_data is None else view_data
+    # retrieve the selected animal from the current page
+    records = view_data or []
     if not records:
         return html.P(
             "No animals match the current filters.", className="page-subtitle"
@@ -1164,18 +1254,24 @@ def show_selected_animal(view_data, selected_rows):
 
 
 # export all matching rows after rescue filters and table filters, not just the current page
+# export all matching database records regardless of the current table page
 @app.callback(
     Output("download-animals", "data"),
     Input("export-animals", "n_clicks"),
-    State("animal-table", "derived_virtual_data"),
+    State("rescue-filter", "value"),
+    State("animal-table", "filter_query"),
     prevent_initial_call=True,
 )
-def export_filtered_records(n_clicks, view_data):
+def export_filtered_records(n_clicks, filter_type, filter_query):
     if not n_clicks:
         raise PreventUpdate
 
+    # apply the same rescue and column filters used by the table
+    query = build_table_query(filter_type, filter_query)
+
     # retrieve all records when no filtered data is available
-    records = db.read({}, animal_fields) if view_data is None else view_data
+    # retrieve every matching record rather than the current page
+    records = db.read(query, animal_fields)
 
     if not records:
         raise PreventUpdate
@@ -1204,14 +1300,23 @@ def export_filtered_records(n_clicks, view_data):
 
 
 # rebuild the breed chart from the filtered records
+# rebuild the breed chart from all matching database records
 @app.callback(
-    Output("breed-chart", "figure"), Input("animal-table", "derived_virtual_data")
+    Output("breed-chart", "figure"),
+    Input("rescue-filter", "value"),
+    Input("animal-table", "filter_query"),
+    Input("record-version", "data"),
 )
-def update_breed_chart(view_data):
-    if view_data is None:
-        view_data = animal_records
-    counts = Counter(str(item.get("breed") or "Unknown") for item in view_data)
-    top_breeds = counts.most_common(10)
+def update_breed_chart(filter_type, filter_query, _version):
+
+    # apply the same filters used by the paginated animal table
+    query = build_table_query(filter_type, filter_query)
+
+    # retrieve the ten most common breeds directly from MongoDB
+    breed_counts = db.aggregate_field_counts("breed", query, limit=10)
+
+    # prepare the aggregated breed counts for the chart
+    top_breeds = [(str(item["_id"]), item["count"]) for item in breed_counts]
     fig = go.Figure()
     if top_breeds:
         breeds, values = zip(*top_breeds)
@@ -1257,12 +1362,12 @@ def update_breed_chart(view_data):
 @app.callback(
     Output("animal-map", "children"),
     Output("selected-animal-info", "children"),
-    Input("animal-table", "derived_virtual_data"),
-    Input("animal-table", "derived_virtual_selected_rows"),
+    Input("animal-table", "data"),
+    Input("animal-table", "selected_rows"),
 )
 def update_animal_map(view_data, selected_rows):
-    if view_data is None:
-        view_data = animal_records
+    # use the selected animal from the current table page
+    view_data = view_data or []
     if not view_data:
         return html.P("No animal records available."), ""
 
@@ -1282,7 +1387,7 @@ def update_animal_map(view_data, selected_rows):
         ],
         style={"fontSize": "14px"},
     )
-
+    # validate coordinates before creating a map component
     try:
         latitude = float(animal.get("location_lat"))
         longitude = float(animal.get("location_long"))
